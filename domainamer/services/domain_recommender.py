@@ -10,14 +10,18 @@ AvailabilityResolver = Callable[[str], AvailabilityDecision]
 
 def normalize_candidate(candidate: str) -> str:
     lowered = candidate.strip().lower()
-    without_tld = re.sub(r"\.com$", "", lowered)
+    without_tld = re.sub(r"\.(com|kr|io|net|org)$", "", lowered)
     compact = re.sub(r"[\s\-]+", "", without_tld)
     return re.sub(r"[^a-z0-9]", "", compact)
 
 
-def to_domain(candidate: str) -> str:
+def to_domain(candidate: str, tld: str = "com") -> str:
     normalized = normalize_candidate(candidate)
-    return f"{normalized}.com" if normalized else ""
+    return f"{normalized}.{tld}" if normalized else ""
+
+
+def normalize_tld(tld: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(tld).lower().replace(".", ""))
 
 
 def default_availability_checker(domain: str) -> bool:
@@ -29,6 +33,7 @@ def generate_alternatives(
     base_candidate: str,
     existing_domains: set[str],
     checker: AvailabilityChecker,
+    preferred_tlds: Iterable[str] = ("com", "kr", "io"),
     limit: int = 3,
 ) -> list[str]:
     base = normalize_candidate(base_candidate)
@@ -38,6 +43,18 @@ def generate_alternatives(
     suffixes = ("go", "lab", "hq", "app", "now", "360")
     alternatives: list[str] = []
     seen = set(existing_domains)
+    for tld in preferred_tlds:
+        normalized_tld = normalize_tld(tld)
+        if not normalized_tld:
+            continue
+        alt = f"{base}.{normalized_tld}"
+        if alt in seen:
+            continue
+        if checker(alt):
+            alternatives.append(alt)
+            seen.add(alt)
+        if len(alternatives) >= limit:
+            return alternatives
 
     for suffix in suffixes:
         alt = f"{base}{suffix}.com"
@@ -66,6 +83,7 @@ def recommend_domains(
     candidates: Iterable[str],
     availability_checker: AvailabilityChecker | None = None,
     availability_resolver: AvailabilityResolver | None = None,
+    preferred_tlds: Iterable[str] = ("com", "kr", "io"),
     alternatives_limit: int = 3,
 ) -> dict[str, list[dict[str, object]]]:
     checker = availability_checker or default_availability_checker
@@ -82,7 +100,11 @@ def recommend_domains(
 
         if normalized in seen_normalized:
             alternatives = generate_alternatives(
-                candidate, seen_domains, checker, alternatives_limit
+                candidate,
+                seen_domains,
+                checker,
+                preferred_tlds=preferred_tlds,
+                limit=alternatives_limit,
             )
             results.append(
                 {
@@ -132,7 +154,11 @@ def recommend_domains(
         alternatives: list[str] = []
         if status == "unavailable":
             alternatives = generate_alternatives(
-                candidate, seen_domains | {domain}, checker, alternatives_limit
+                candidate,
+                seen_domains | {domain},
+                checker,
+                preferred_tlds=preferred_tlds,
+                limit=alternatives_limit,
             )
         results.append(
             {

@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
+from .models import DomainAlertEvent, DomainWatchItem
 from .services.availability import (
+    AvailabilityDecision,
     AvailabilityConfig,
     AvailabilityOrchestrator,
     IpPool,
@@ -16,6 +18,7 @@ from .services.availability import (
 )
 
 from .services.domain_recommender import normalize_candidate, recommend_domains
+from .services.watchlist import run_watchlist_check
 
 
 class SequenceProvider:
@@ -101,6 +104,51 @@ class DomainRecommenderServiceTests(TestCase):
         self.assertNotIn("brandhubgo.com", result["alternatives"])
         self.assertIn("confidence", result)
         self.assertIn("evidence", result)
+
+    def test_recommend_domains_prioritizes_tld_fallback_for_unavailable_dotcom(self):
+        unavailable = {"brandhub.com"}
+
+        def checker(domain: str) -> bool:
+            return domain not in unavailable
+
+        data = recommend_domains(
+            ["brandhub.com"],
+            availability_checker=checker,
+            preferred_tlds=("com", "kr", "io"),
+        )
+        alternatives = data["results"][0]["alternatives"]
+        self.assertGreaterEqual(len(alternatives), 2)
+        self.assertEqual(alternatives[0], "brandhub.kr")
+        self.assertEqual(alternatives[1], "brandhub.io")
+
+
+class WatchlistServiceTests(TestCase):
+    @staticmethod
+    def _decision(status: str) -> AvailabilityDecision:
+        reason = None if status == "available" else "already_registered"
+        if status == "uncertain":
+            reason = "insufficient_quorum"
+        return AvailabilityDecision(
+            status=status, reason=reason, confidence=0.8, evidence=[], checked_at=datetime.now(timezone.utc).isoformat()
+        )
+
+    def test_transition_unavailable_to_available_creates_single_alert(self):
+        item = DomainWatchItem.objects.create(base_name="quroom", tlds=["com"])
+
+        statuses = iter(["unavailable", "available", "available"])
+
+        def resolver(_domain: str):
+            return self._decision(next(statuses))
+
+        run_watchlist_check([item], resolver)
+        run_watchlist_check([item], resolver)
+        run_watchlist_check([item], resolver)
+
+        self.assertEqual(DomainAlertEvent.objects.count(), 1)
+        alert = DomainAlertEvent.objects.first()
+        self.assertEqual(alert.domain, "quroom.com")
+        self.assertEqual(alert.previous_status, "unavailable")
+        self.assertEqual(alert.current_status, "available")
 
 
 class AvailabilityDecisionTests(TestCase):
@@ -422,3 +470,43 @@ class DomainRecommendationViewTests(TestCase):
                 content_type="application/json",
             )
         self.assertEqual(response.status_code, 200)
+
+
+class WatchlistApiTests(TestCase):
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False)
+    def test_watchlist_create_and_list(self):
+        create_response = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com", "kr"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 201)
+        payload = create_response.json()
+        self.assertEqual(payload["base_name"], "quroom")
+        self.assertEqual(payload["tlds"], ["com", "kr"])
+
+        list_response = self.client.get("/domainamer/watchlist/")
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(len(list_payload["items"]), 1)
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False, DOMAIN_UNAVAILABLE_DOMAINS=["quroom.com"])
+    def test_watchlist_check_creates_alert_after_transition(self):
+        self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com"]}),
+            content_type="application/json",
+        )
+
+        first = self.client.post("/domainamer/watchlist/check/", data="{}", content_type="application/json")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["summary"]["alerts_created"], 0)
+
+        with override_settings(DOMAIN_UNAVAILABLE_DOMAINS=[]):
+            second = self.client.post("/domainamer/watchlist/check/", data="{}", content_type="application/json")
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.json()["summary"]["alerts_created"], 1)
+
+        alerts = self.client.get("/domainamer/watchlist/alerts/")
+        self.assertEqual(alerts.status_code, 200)
+        self.assertEqual(len(alerts.json()["alerts"]), 1)

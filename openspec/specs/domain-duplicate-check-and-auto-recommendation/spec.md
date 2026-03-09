@@ -23,11 +23,15 @@ The system SHALL check normalized non-duplicate candidates for domain availabili
 - **THEN** the candidate result SHALL be marked as `uncertain`
 
 ### Requirement: Automatic alternatives for blocked candidates
-The system SHALL generate alternative candidates for each `duplicate` or `unavailable` candidate and include them in the response.
+The system SHALL generate alternative candidates for each `duplicate` or `unavailable` candidate and include them in the response, including prioritized TLD fallback alternatives.
 
 #### Scenario: Alternatives returned for unavailable candidate
 - **WHEN** `brandhub.com` is classified as `unavailable`
 - **THEN** the response SHALL include one or more alternatives for `brandhub.com`
+
+#### Scenario: Preferred TLD fallback for unavailable .com
+- **WHEN** `brandhub.com` is classified as `unavailable`
+- **THEN** alternatives SHALL include fallback TLD candidates such as `brandhub.kr` before synthetic suffix variants when available
 
 ### Requirement: Recommendation response contract
 The system SHALL return a structured recommendation payload containing candidate, status, reason, alternatives, confidence, and evidence for every submitted candidate, with evidence fields populated from the real availability-check pipeline.
