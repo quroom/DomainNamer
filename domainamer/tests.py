@@ -9,6 +9,8 @@ from .services.availability import (
     AvailabilityOrchestrator,
     IpPool,
     ProviderCheckResult,
+    RdapProvider,
+    WhoisProvider,
     compute_confidence,
     evaluate_quorum,
 )
@@ -32,6 +34,43 @@ class SequenceProvider:
             ip=ip,
             source_quality=self.source_quality,
         )
+
+
+class FakeHttpResponse:
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self._body = body.encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeSocketConnection:
+    def __init__(self, payload: str):
+        self.payload = payload.encode("utf-8")
+        self.sent = b""
+        self._reads = 0
+
+    def sendall(self, data: bytes):
+        self.sent += data
+
+    def recv(self, _size: int):
+        if self._reads == 0:
+            self._reads += 1
+            return self.payload
+        return b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 class DomainRecommenderServiceTests(TestCase):
@@ -133,6 +172,47 @@ class AvailabilityDecisionTests(TestCase):
             config,
         )
         self.assertLessEqual(low, 0.49)
+
+
+class RealProviderParsingTests(TestCase):
+    @patch("domainamer.services.availability.urllib.request.urlopen")
+    def test_rdap_provider_parses_404_as_available(self, mock_urlopen):
+        from urllib.error import HTTPError
+
+        mock_urlopen.side_effect = HTTPError(
+            url="https://rdap.org/domain/free.com",
+            code=404,
+            msg="not found",
+            hdrs=None,
+            fp=None,
+        )
+        provider = RdapProvider()
+        result = provider.check("free.com", "10.0.0.1")
+        self.assertEqual(result.outcome, "available")
+
+    @patch("domainamer.services.availability.urllib.request.urlopen")
+    def test_rdap_provider_parses_registered_as_unavailable(self, mock_urlopen):
+        mock_urlopen.return_value = FakeHttpResponse(
+            200,
+            '{"objectClassName":"domain","ldhName":"taken.com"}',
+        )
+        provider = RdapProvider()
+        result = provider.check("taken.com", "10.0.0.1")
+        self.assertEqual(result.outcome, "unavailable")
+
+    @patch("domainamer.services.availability.socket.create_connection")
+    def test_whois_provider_parses_not_found_as_available(self, mock_conn):
+        mock_conn.return_value = FakeSocketConnection("No match for domain \"FREE.COM\"")
+        provider = WhoisProvider()
+        result = provider.check("free.com", "10.0.0.1")
+        self.assertEqual(result.outcome, "available")
+
+    @patch("domainamer.services.availability.socket.create_connection")
+    def test_whois_provider_parses_registered_as_unavailable(self, mock_conn):
+        mock_conn.return_value = FakeSocketConnection("Domain Name: TAKEN.COM\nRegistrar: Example")
+        provider = WhoisProvider()
+        result = provider.check("taken.com", "10.0.0.1")
+        self.assertEqual(result.outcome, "unavailable")
 
 
 class IpPoolBehaviorTests(TestCase):
@@ -275,6 +355,59 @@ class DomainRecommendationViewTests(TestCase):
         response = self.client.post(
             "/domainamer/recommend/",
             data=json.dumps({"candidates": ["takenbrand"]}),
+            content_type="application/json",
+        )
+        payload = response.json()
+        self.assertEqual(payload["results"][0]["status"], "available")
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=True, DOMAIN_REAL_PROVIDER_ENABLED=True)
+    @patch("domainamer.services.availability.urllib.request.urlopen")
+    @patch("domainamer.services.availability.socket.create_connection")
+    def test_real_provider_mode_success(self, mock_conn, mock_urlopen):
+        mock_urlopen.return_value = FakeHttpResponse(404, '{"errorCode":404}')
+        mock_conn.return_value = FakeSocketConnection("No match for domain \"FREE.COM\"")
+        response = self.client.post(
+            "/domainamer/recommend/",
+            data=json.dumps({"candidates": ["free"]}),
+            content_type="application/json",
+        )
+        payload = response.json()
+        self.assertEqual(payload["results"][0]["status"], "available")
+        self.assertGreater(len(payload["results"][0]["evidence"]), 0)
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=True, DOMAIN_REAL_PROVIDER_ENABLED=True)
+    @patch("domainamer.services.availability.urllib.request.urlopen")
+    @patch("domainamer.services.availability.socket.create_connection")
+    def test_real_provider_mode_conflict_returns_uncertain(self, mock_conn, mock_urlopen):
+        mock_urlopen.return_value = FakeHttpResponse(
+            200,
+            '{"objectClassName":"domain","ldhName":"conflict.com"}',
+        )
+        mock_conn.return_value = FakeSocketConnection("No match for domain \"CONFLICT.COM\"")
+        response = self.client.post(
+            "/domainamer/recommend/",
+            data=json.dumps({"candidates": ["conflict"]}),
+            content_type="application/json",
+        )
+        payload = response.json()
+        self.assertEqual(payload["results"][0]["status"], "uncertain")
+
+    @override_settings(
+        DOMAIN_HARDENED_CHECK_ENABLED=True,
+        DOMAIN_REAL_PROVIDER_ENABLED=True,
+        DOMAIN_SHADOW_MODE=True,
+    )
+    @patch("domainamer.services.availability.urllib.request.urlopen")
+    @patch("domainamer.services.availability.socket.create_connection")
+    def test_shadow_mode_with_real_providers_keeps_legacy_response(self, mock_conn, mock_urlopen):
+        mock_urlopen.return_value = FakeHttpResponse(
+            200,
+            '{"objectClassName":"domain","ldhName":"taken.com"}',
+        )
+        mock_conn.return_value = FakeSocketConnection("Domain Name: TAKEN.COM")
+        response = self.client.post(
+            "/domainamer/recommend/",
+            data=json.dumps({"candidates": ["taken"]}),
             content_type="application/json",
         )
         payload = response.json()

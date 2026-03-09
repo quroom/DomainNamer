@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import socket
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from statistics import mean
@@ -18,6 +23,7 @@ class ProviderCheckResult:
     ip: str
     error_code: ErrorCode | None = None
     source_quality: float = 0.8
+    request_meta: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -35,6 +41,194 @@ class AvailabilityProvider(Protocol):
 
     def check(self, domain: str, ip: str) -> ProviderCheckResult:
         """Check the given domain from the given outbound ip."""
+
+
+@dataclass
+class RdapProvider:
+    name: str = "rdap"
+    source_quality: float = 0.95
+    endpoint_template: str = "https://rdap.org/domain/{domain}"
+    timeout_ms: int = 1200
+    user_agent: str = "DomainNamer/1.0"
+
+    def check(self, domain: str, ip: str) -> ProviderCheckResult:
+        started = time.monotonic()
+        endpoint = self.endpoint_template.format(domain=domain)
+        request = urllib.request.Request(
+            endpoint,
+            headers={"User-Agent": self.user_agent, "Accept": "application/rdap+json, application/json"},
+        )
+        meta = {"endpoint": endpoint, "protocol": "rdap-http", "via_ip": ip}
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_ms / 1000) as response:
+                payload = response.read().decode("utf-8", errors="ignore")
+                latency_ms = int((time.monotonic() - started) * 1000)
+                if response.status == 429:
+                    return ProviderCheckResult(
+                        provider=self.name,
+                        outcome="error",
+                        error_code="rate_limited",
+                        latency_ms=latency_ms,
+                        ip=ip,
+                        source_quality=self.source_quality,
+                        request_meta=meta,
+                    )
+                if response.status >= 500:
+                    return ProviderCheckResult(
+                        provider=self.name,
+                        outcome="error",
+                        error_code="error",
+                        latency_ms=latency_ms,
+                        ip=ip,
+                        source_quality=self.source_quality,
+                        request_meta=meta,
+                    )
+                outcome = "unavailable"
+                if self._looks_available(payload):
+                    outcome = "available"
+                return ProviderCheckResult(
+                    provider=self.name,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                    ip=ip,
+                    source_quality=self.source_quality,
+                    request_meta=meta,
+                )
+        except urllib.error.HTTPError as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            if exc.code == 404:
+                return ProviderCheckResult(
+                    provider=self.name,
+                    outcome="available",
+                    latency_ms=latency_ms,
+                    ip=ip,
+                    source_quality=self.source_quality,
+                    request_meta=meta,
+                )
+            error_code: ErrorCode = "rate_limited" if exc.code == 429 else "error"
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome="error",
+                error_code=error_code,
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+        except socket.timeout:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome="error",
+                error_code="timeout",
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+        except urllib.error.URLError as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            error_code: ErrorCode = "timeout" if isinstance(getattr(exc, "reason", None), socket.timeout) else "error"
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome="error",
+                error_code=error_code,
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+
+    @staticmethod
+    def _looks_available(payload: str) -> bool:
+        lower_payload = payload.lower()
+        if "not found" in lower_payload or "no object found" in lower_payload:
+            return True
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return False
+        if isinstance(data, dict) and data.get("errorCode") == 404:
+            return True
+        return False
+
+
+@dataclass
+class WhoisProvider:
+    name: str = "whois"
+    source_quality: float = 0.90
+    timeout_ms: int = 1200
+    default_server: str = "whois.verisign-grs.com"
+    port: int = 43
+
+    def check(self, domain: str, ip: str) -> ProviderCheckResult:
+        started = time.monotonic()
+        meta = {
+            "server": self.default_server,
+            "protocol": "whois",
+            "port": self.port,
+            "via_ip": ip,
+        }
+        try:
+            with socket.create_connection(
+                (self.default_server, self.port),
+                timeout=self.timeout_ms / 1000,
+            ) as conn:
+                conn.sendall(f"{domain}\r\n".encode("utf-8"))
+                payload = self._recv_all(conn)
+            latency_ms = int((time.monotonic() - started) * 1000)
+            outcome = "available" if self._looks_available(payload) else "unavailable"
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome=outcome,
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+        except socket.timeout:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome="error",
+                error_code="timeout",
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+        except OSError:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            return ProviderCheckResult(
+                provider=self.name,
+                outcome="error",
+                error_code="error",
+                latency_ms=latency_ms,
+                ip=ip,
+                source_quality=self.source_quality,
+                request_meta=meta,
+            )
+
+    @staticmethod
+    def _recv_all(conn: socket.socket) -> str:
+        chunks: list[bytes] = []
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if len(chunks) > 128:
+                break
+        return b"".join(chunks).decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _looks_available(payload: str) -> bool:
+        normalized = payload.lower()
+        return (
+            "no match for" in normalized
+            or "not found" in normalized
+            or "status: free" in normalized
+        )
 
 
 @dataclass
@@ -149,6 +343,7 @@ class AvailabilityConfig:
     confidence_weight_error: float = 0.10
     fallback_to_legacy: bool = True
     shadow_mode: bool = False
+    max_attempts_per_provider: int = 3
 
 
 class InMemoryTelemetry:
@@ -323,6 +518,7 @@ class AvailabilityOrchestrator:
                 "error_code": result.error_code,
                 "latency_ms": result.latency_ms,
                 "ip": result.ip,
+                "request_meta": result.request_meta,
             }
             for result in provider_results
         ]
@@ -339,7 +535,7 @@ class AvailabilityOrchestrator:
     def _check_provider_with_failover(
         self, provider: AvailabilityProvider, domain: str, now: datetime
     ) -> ProviderCheckResult:
-        max_attempts = 3
+        max_attempts = self.config.max_attempts_per_provider
         latest_error: ProviderCheckResult | None = None
         for _ in range(max_attempts):
             ip = self.ip_pool.select_ip(now)
@@ -358,4 +554,3 @@ class AvailabilityOrchestrator:
             ip=self.ip_pool.select_ip(now),
             source_quality=provider.source_quality,
         )
-

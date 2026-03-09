@@ -8,11 +8,14 @@ from .services.availability import (
     AvailabilityConfig,
     AvailabilityOrchestrator,
     IpPool,
+    RdapProvider,
     RuleBasedProvider,
+    WhoisProvider,
 )
 from .services.domain_recommender import recommend_domains
 
 _ORCHESTRATOR = None
+_ORCHESTRATOR_KEY = None
 
 
 def _parse_candidates(request):
@@ -43,17 +46,42 @@ def _build_orchestrator() -> AvailabilityOrchestrator:
     rate_limited_domains = set(getattr(settings, "DOMAIN_RATE_LIMITED_DOMAINS", []))
     ips = getattr(settings, "DOMAIN_CHECK_IP_POOL", ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
 
-    providers = [
-        RuleBasedProvider(
-            name="rdap-a",
-            source_quality=0.95,
-            blocked_domains=blocked,
-            timeout_domains=timeout_domains,
-            rate_limited_domains=rate_limited_domains,
-        ),
-        RuleBasedProvider(name="whois-b", source_quality=0.90, blocked_domains=blocked),
-        RuleBasedProvider(name="dns-c", source_quality=0.85, blocked_domains=blocked),
-    ]
+    use_real = getattr(settings, "DOMAIN_REAL_PROVIDER_ENABLED", False)
+    if use_real:
+        providers = [
+            RdapProvider(
+                name="rdap-a",
+                source_quality=0.95,
+                endpoint_template=getattr(
+                    settings,
+                    "DOMAIN_RDAP_ENDPOINT_TEMPLATE",
+                    "https://rdap.org/domain/{domain}",
+                ),
+                timeout_ms=getattr(settings, "AVAILABILITY_PROVIDER_TIMEOUT_MS", 1200),
+            ),
+            WhoisProvider(
+                name="whois-b",
+                source_quality=0.90,
+                timeout_ms=getattr(settings, "AVAILABILITY_PROVIDER_TIMEOUT_MS", 1200),
+                default_server=getattr(
+                    settings,
+                    "DOMAIN_WHOIS_SERVER",
+                    "whois.verisign-grs.com",
+                ),
+            ),
+        ]
+    else:
+        providers = [
+            RuleBasedProvider(
+                name="rdap-a",
+                source_quality=0.95,
+                blocked_domains=blocked,
+                timeout_domains=timeout_domains,
+                rate_limited_domains=rate_limited_domains,
+            ),
+            RuleBasedProvider(name="whois-b", source_quality=0.90, blocked_domains=blocked),
+            RuleBasedProvider(name="dns-c", source_quality=0.85, blocked_domains=blocked),
+        ]
 
     config = AvailabilityConfig(
         timeout_ms=getattr(settings, "AVAILABILITY_PROVIDER_TIMEOUT_MS", 1200),
@@ -67,6 +95,7 @@ def _build_orchestrator() -> AvailabilityOrchestrator:
         confidence_weight_error=getattr(settings, "CONFIDENCE_WEIGHT_ERROR", 0.10),
         fallback_to_legacy=getattr(settings, "DOMAIN_HARDENED_FALLBACK_TO_LEGACY", True),
         shadow_mode=getattr(settings, "DOMAIN_SHADOW_MODE", False),
+        max_attempts_per_provider=getattr(settings, "AVAILABILITY_MAX_ATTEMPTS_PER_PROVIDER", 3),
     )
     ip_pool = IpPool(
         ips=ips,
@@ -77,9 +106,17 @@ def _build_orchestrator() -> AvailabilityOrchestrator:
 
 
 def _get_orchestrator() -> AvailabilityOrchestrator:
-    global _ORCHESTRATOR
-    if _ORCHESTRATOR is None:
+    global _ORCHESTRATOR, _ORCHESTRATOR_KEY
+    key = (
+        getattr(settings, "DOMAIN_REAL_PROVIDER_ENABLED", False),
+        getattr(settings, "DOMAIN_RDAP_ENDPOINT_TEMPLATE", ""),
+        getattr(settings, "DOMAIN_WHOIS_SERVER", ""),
+        tuple(getattr(settings, "DOMAIN_CHECK_IP_POOL", [])),
+        getattr(settings, "AVAILABILITY_PROVIDER_TIMEOUT_MS", 1200),
+    )
+    if _ORCHESTRATOR is None or _ORCHESTRATOR_KEY != key:
         _ORCHESTRATOR = _build_orchestrator()
+        _ORCHESTRATOR_KEY = key
     return _ORCHESTRATOR
 
 

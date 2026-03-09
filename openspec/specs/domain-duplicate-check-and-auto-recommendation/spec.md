@@ -30,7 +30,7 @@ The system SHALL generate alternative candidates for each `duplicate` or `unavai
 - **THEN** the response SHALL include one or more alternatives for `brandhub.com`
 
 ### Requirement: Recommendation response contract
-The system SHALL return a structured recommendation payload containing candidate, status, reason, alternatives, confidence, and evidence for every submitted candidate.
+The system SHALL return a structured recommendation payload containing candidate, status, reason, alternatives, confidence, and evidence for every submitted candidate, with evidence fields populated from the real availability-check pipeline.
 
 #### Scenario: Structured response shape
 - **WHEN** a recommendation request is completed
@@ -39,3 +39,7 @@ The system SHALL return a structured recommendation payload containing candidate
 #### Scenario: Uncertain recommendation exposure
 - **WHEN** availability resolution returns `uncertain`
 - **THEN** the recommendation response SHALL preserve `uncertain` status and include non-empty `evidence` describing provider outcomes
+
+#### Scenario: Recommendation contains provider evidence
+- **WHEN** recommendation response includes availability metadata
+- **THEN** `evidence` SHALL reference normalized RDAP/WHOIS provider outcomes instead of simulation-only markers
