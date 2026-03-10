@@ -4,7 +4,7 @@ from django.conf import settings
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from .models import DomainAlertEvent, DomainWatchItem
+from .models import DomainAlertEvent, DomainWatchItem, WatchlistCheckJob
 from .services.availability import (
     AvailabilityConfig,
     AvailabilityOrchestrator,
@@ -14,7 +14,6 @@ from .services.availability import (
     WhoisProvider,
 )
 from .services.domain_recommender import normalize_candidate, recommend_domains
-from .services.watchlist import run_watchlist_check
 
 _ORCHESTRATOR = None
 _ORCHESTRATOR_KEY = None
@@ -62,6 +61,16 @@ def _parse_watch_payload(request):
     if not base_name or not cleaned_tlds:
         return None, None
     return base_name, cleaned_tlds
+
+
+def _canonical_tlds(tlds: list[str]) -> str:
+    return ",".join(sorted(set(tlds)))
+
+
+def _require_auth(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "auth_required"}, status=401)
+    return None
 
 
 def re_split(raw: str) -> list[str]:
@@ -191,8 +200,12 @@ def recommend_domains_view(request):
 
 @require_http_methods(["GET", "POST"])
 def watchlist_view(request):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
     if request.method == "GET":
-        items = DomainWatchItem.objects.order_by("-updated_at")
+        items = DomainWatchItem.objects.filter(owner=request.user).order_by("-updated_at")
         payload = {
             "items": [
                 {
@@ -211,8 +224,26 @@ def watchlist_view(request):
     base_name, tlds = _parse_watch_payload(request)
     if not base_name or not tlds:
         return JsonResponse({"error": "invalid_watch_payload"}, status=400)
+    canonical_tlds = _canonical_tlds(tlds)
 
-    watch = DomainWatchItem.objects.create(base_name=base_name, tlds=tlds)
+    max_items = int(getattr(settings, "WATCHLIST_MAX_ITEMS_PER_USER", 20))
+    active_count = DomainWatchItem.objects.filter(owner=request.user, is_active=True).count()
+    if active_count >= max_items:
+        return JsonResponse({"error": "watch_quota_exceeded", "max_items": max_items}, status=429)
+
+    if DomainWatchItem.objects.filter(
+        owner=request.user,
+        base_name=base_name,
+        canonical_tlds=canonical_tlds,
+    ).exists():
+        return JsonResponse({"error": "watch_duplicate"}, status=409)
+
+    watch = DomainWatchItem.objects.create(
+        owner=request.user,
+        base_name=base_name,
+        tlds=tlds,
+        canonical_tlds=canonical_tlds,
+    )
     return JsonResponse(
         {
             "id": watch.id,
@@ -226,31 +257,26 @@ def watchlist_view(request):
 
 @require_POST
 def watchlist_check_view(request):
-    orchestrator = _get_orchestrator()
-    items = DomainWatchItem.objects.filter(is_active=True).order_by("id")
-    summary = run_watchlist_check(items, availability_resolver=orchestrator.check)
-    recent_alerts = DomainAlertEvent.objects.order_by("-created_at")[:20]
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    job = WatchlistCheckJob.objects.create(owner=request.user, status=WatchlistCheckJob.STATUS_QUEUED)
     return JsonResponse(
         {
-            "summary": summary,
-            "alerts": [
-                {
-                    "id": event.id,
-                    "watch_item_id": event.watch_item_id,
-                    "domain": event.domain,
-                    "previous_status": event.previous_status,
-                    "current_status": event.current_status,
-                    "checked_at": event.checked_at.isoformat(),
-                }
-                for event in recent_alerts
-            ],
+            "job_id": job.id,
+            "status": job.status,
         }
-    )
+    , status=202)
 
 
 @require_GET
 def watchlist_alerts_view(request):
-    events = DomainAlertEvent.objects.order_by("-created_at")
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    events = DomainAlertEvent.objects.filter(watch_item__owner=request.user).order_by("-created_at")
     return JsonResponse(
         {
             "alerts": [
@@ -265,5 +291,29 @@ def watchlist_alerts_view(request):
                 }
                 for event in events
             ]
+        }
+    )
+
+
+@require_GET
+def watchlist_check_job_status_view(request, job_id: int):
+    auth_error = _require_auth(request)
+    if auth_error:
+        return auth_error
+
+    try:
+        job = WatchlistCheckJob.objects.get(id=job_id, owner=request.user)
+    except WatchlistCheckJob.DoesNotExist:
+        return JsonResponse({"error": "job_not_found"}, status=404)
+
+    return JsonResponse(
+        {
+            "id": job.id,
+            "status": job.status,
+            "summary": job.summary,
+            "error_message": job.error_message,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "created_at": job.created_at.isoformat(),
         }
     )

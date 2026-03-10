@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Watchlist registration
 The system SHALL allow authenticated clients to register a domain watch item with base name and one or more TLDs.
@@ -10,20 +10,6 @@ The system SHALL allow authenticated clients to register a domain watch item wit
 #### Scenario: Unauthenticated request is rejected
 - **WHEN** an unauthenticated client calls watchlist create endpoint
 - **THEN** the system SHALL return an authorization error and SHALL NOT create a watch item
-
-### Requirement: Scheduled availability check
-The system SHALL provide an executable check routine that evaluates each active watch item against the availability pipeline.
-
-#### Scenario: Batch check updates latest status
-- **WHEN** check routine runs for active watch items
-- **THEN** system SHALL update per-domain latest status and checked timestamp
-
-### Requirement: Availability transition alerting
-The system SHALL create an alert event when a watched domain transitions from unavailable to available.
-
-#### Scenario: Transition creates one alert event
-- **WHEN** prior status is `unavailable` and current status is `available`
-- **THEN** system SHALL create one alert event for that domain check cycle
 
 ### Requirement: Alert deduplication per cycle
 The system SHALL avoid duplicate watch item registrations and duplicate alert events for unchanged available status.

@@ -2,9 +2,11 @@ import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 
-from .models import DomainAlertEvent, DomainWatchItem
+from .models import DomainAlertEvent, DomainWatchItem, WatchlistCheckJob
 from .services.availability import (
     AvailabilityDecision,
     AvailabilityConfig,
@@ -19,6 +21,8 @@ from .services.availability import (
 
 from .services.domain_recommender import normalize_candidate, recommend_domains
 from .services.watchlist import run_watchlist_check
+
+User = get_user_model()
 
 
 class SequenceProvider:
@@ -473,8 +477,21 @@ class DomainRecommendationViewTests(TestCase):
 
 
 class WatchlistApiTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="alice", password="pw-12345")
+        self.other = User.objects.create_user(username="bob", password="pw-12345")
+
+    def test_watchlist_requires_authentication(self):
+        create_response = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 401)
+
     @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False)
-    def test_watchlist_create_and_list(self):
+    def test_watchlist_create_and_owner_scoped_list(self):
+        self.client.force_login(self.user)
         create_response = self.client.post(
             "/domainamer/watchlist/",
             data=json.dumps({"base_name": "quroom", "tlds": ["com", "kr"]}),
@@ -490,8 +507,71 @@ class WatchlistApiTests(TestCase):
         list_payload = list_response.json()
         self.assertEqual(len(list_payload["items"]), 1)
 
+        self.client.logout()
+        self.client.force_login(self.other)
+        other_list = self.client.get("/domainamer/watchlist/")
+        self.assertEqual(other_list.status_code, 200)
+        self.assertEqual(len(other_list.json()["items"]), 0)
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False)
+    def test_watchlist_duplicate_registration_is_rejected(self):
+        self.client.force_login(self.user)
+        first = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["kr", "com"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(first.status_code, 201)
+
+        second = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com", "kr"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error"], "watch_duplicate")
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False, WATCHLIST_MAX_ITEMS_PER_USER=1)
+    def test_watchlist_quota_is_enforced(self):
+        self.client.force_login(self.user)
+        first = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(first.status_code, 201)
+        second = self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom2", "tlds": ["com"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.json()["error"], "watch_quota_exceeded")
+
+    @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False)
+    def test_watchlist_check_enqueue_and_job_status(self):
+        self.client.force_login(self.user)
+        self.client.post(
+            "/domainamer/watchlist/",
+            data=json.dumps({"base_name": "quroom", "tlds": ["com"]}),
+            content_type="application/json",
+        )
+        enqueue = self.client.post("/domainamer/watchlist/check/", data="{}", content_type="application/json")
+        self.assertEqual(enqueue.status_code, 202)
+        job_id = enqueue.json()["job_id"]
+        self.assertEqual(WatchlistCheckJob.objects.get(id=job_id).status, WatchlistCheckJob.STATUS_QUEUED)
+
+        call_command("process_watchlist_jobs")
+
+        status_response = self.client.get(f"/domainamer/watchlist/check-jobs/{job_id}/")
+        self.assertEqual(status_response.status_code, 200)
+        status_payload = status_response.json()
+        self.assertEqual(status_payload["status"], WatchlistCheckJob.STATUS_SUCCEEDED)
+        self.assertIn("checked_domains", status_payload["summary"])
+
     @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=False, DOMAIN_UNAVAILABLE_DOMAINS=["quroom.com"])
     def test_watchlist_check_creates_alert_after_transition(self):
+        self.client.force_login(self.user)
         self.client.post(
             "/domainamer/watchlist/",
             data=json.dumps({"base_name": "quroom", "tlds": ["com"]}),
@@ -499,13 +579,19 @@ class WatchlistApiTests(TestCase):
         )
 
         first = self.client.post("/domainamer/watchlist/check/", data="{}", content_type="application/json")
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(first.json()["summary"]["alerts_created"], 0)
+        self.assertEqual(first.status_code, 202)
+        first_job_id = first.json()["job_id"]
+        call_command("process_watchlist_jobs")
+        first_job = self.client.get(f"/domainamer/watchlist/check-jobs/{first_job_id}/").json()
+        self.assertEqual(first_job["summary"]["alerts_created"], 0)
 
         with override_settings(DOMAIN_UNAVAILABLE_DOMAINS=[]):
             second = self.client.post("/domainamer/watchlist/check/", data="{}", content_type="application/json")
-            self.assertEqual(second.status_code, 200)
-            self.assertEqual(second.json()["summary"]["alerts_created"], 1)
+            self.assertEqual(second.status_code, 202)
+            second_job_id = second.json()["job_id"]
+            call_command("process_watchlist_jobs")
+            second_job = self.client.get(f"/domainamer/watchlist/check-jobs/{second_job_id}/").json()
+            self.assertEqual(second_job["summary"]["alerts_created"], 1)
 
         alerts = self.client.get("/domainamer/watchlist/alerts/")
         self.assertEqual(alerts.status_code, 200)
