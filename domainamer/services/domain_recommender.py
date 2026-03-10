@@ -24,6 +24,20 @@ def normalize_tld(tld: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(tld).lower().replace(".", ""))
 
 
+def normalize_domain_entry(domain: str) -> str:
+    raw = str(domain).strip().lower()
+    if not raw:
+        return ""
+    if "." not in raw:
+        return to_domain(raw)
+    name, _, tld = raw.rpartition(".")
+    normalized_name = normalize_candidate(name)
+    normalized_tld = normalize_tld(tld)
+    if not normalized_name or not normalized_tld:
+        return ""
+    return f"{normalized_name}.{normalized_tld}"
+
+
 def default_availability_checker(domain: str) -> bool:
     # Default is permissive so callers can inject real WHOIS/registry checks later.
     return bool(domain)
@@ -175,3 +189,31 @@ def recommend_domains(
         seen_domains.update(alternatives)
 
     return {"results": results}
+
+
+def reroll_domain_alternatives(
+    base_candidate: str,
+    exclude_domains: Iterable[str],
+    availability_checker: AvailabilityChecker | None = None,
+    preferred_tlds: Iterable[str] = ("com", "kr", "io"),
+    limit: int = 3,
+) -> dict[str, object]:
+    checker = availability_checker or default_availability_checker
+    base_domain = to_domain(base_candidate)
+    normalized_excludes = {item for item in (normalize_domain_entry(domain) for domain in exclude_domains) if item}
+    seen_domains = set(normalized_excludes)
+    if base_domain:
+        seen_domains.add(base_domain)
+
+    alternatives = generate_alternatives(
+        base_candidate=base_candidate,
+        existing_domains=seen_domains,
+        checker=checker,
+        preferred_tlds=preferred_tlds,
+        limit=limit,
+    )
+    return {
+        "candidate": base_domain,
+        "excluded": sorted(normalized_excludes),
+        "alternatives": alternatives,
+    }

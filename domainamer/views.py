@@ -13,7 +13,11 @@ from .services.availability import (
     RuleBasedProvider,
     WhoisProvider,
 )
-from .services.domain_recommender import normalize_candidate, recommend_domains
+from .services.domain_recommender import (
+    normalize_candidate,
+    recommend_domains,
+    reroll_domain_alternatives,
+)
 
 _ORCHESTRATOR = None
 _ORCHESTRATOR_KEY = None
@@ -196,6 +200,36 @@ def recommend_domains_view(request):
         # Shadow mode computes hardened checks for telemetry while preserving legacy response.
         return JsonResponse(recommend_domains(candidates, preferred_tlds=preferred_tlds))
     return JsonResponse(hardened_payload)
+
+
+@require_POST
+def reroll_recommendation_view(request):
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    base_candidate = str(payload.get("candidate", "")).strip()
+    if not base_candidate:
+        return JsonResponse({"error": "candidate_required"}, status=400)
+    exclude = payload.get("exclude", [])
+    if not isinstance(exclude, list):
+        return JsonResponse({"error": "exclude_must_be_list"}, status=400)
+
+    preferred_tlds = tuple(getattr(settings, "DOMAIN_PREFERRED_TLDS", ["com", "kr", "io"]))
+    limit = int(payload.get("limit", 3))
+    if limit < 1:
+        limit = 1
+    if limit > 20:
+        limit = 20
+
+    result = reroll_domain_alternatives(
+        base_candidate=base_candidate,
+        exclude_domains=exclude,
+        preferred_tlds=preferred_tlds,
+        limit=limit,
+    )
+    return JsonResponse(result)
 
 
 @require_http_methods(["GET", "POST"])

@@ -19,7 +19,11 @@ from .services.availability import (
     evaluate_quorum,
 )
 
-from .services.domain_recommender import normalize_candidate, recommend_domains
+from .services.domain_recommender import (
+    normalize_candidate,
+    recommend_domains,
+    reroll_domain_alternatives,
+)
 from .services.watchlist import run_watchlist_check
 
 User = get_user_model()
@@ -124,6 +128,17 @@ class DomainRecommenderServiceTests(TestCase):
         self.assertGreaterEqual(len(alternatives), 2)
         self.assertEqual(alternatives[0], "brandhub.kr")
         self.assertEqual(alternatives[1], "brandhub.io")
+
+    def test_reroll_excludes_previously_suggested_domains(self):
+        data = reroll_domain_alternatives(
+            base_candidate="brandhub",
+            exclude_domains=["brandhub.kr", "brandhub.io"],
+            preferred_tlds=("com", "kr", "io"),
+            limit=2,
+        )
+        self.assertNotIn("brandhub.kr", data["alternatives"])
+        self.assertNotIn("brandhub.io", data["alternatives"])
+        self.assertGreater(len(data["alternatives"]), 0)
 
 
 class WatchlistServiceTests(TestCase):
@@ -474,6 +489,24 @@ class DomainRecommendationViewTests(TestCase):
                 content_type="application/json",
             )
         self.assertEqual(response.status_code, 200)
+
+    def test_recommend_reroll_endpoint_excludes_domains(self):
+        response = self.client.post(
+            "/domainamer/recommend/reroll/",
+            data=json.dumps(
+                {
+                    "candidate": "brandhub",
+                    "exclude": ["brandhub.kr", "brandhub.io"],
+                    "limit": 3,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["candidate"], "brandhub.com")
+        self.assertNotIn("brandhub.kr", payload["alternatives"])
+        self.assertNotIn("brandhub.io", payload["alternatives"])
 
 
 class WatchlistApiTests(TestCase):
