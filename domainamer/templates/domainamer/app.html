@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DomainNamer</title>
+  <style>
+    :root {
+      --ink: #111827;
+      --muted: #475569;
+      --line: #d4dce8;
+      --panel: #ffffff;
+      --ok: #0f766e;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --bg-1: #ecfeff;
+      --bg-2: #fff7ed;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans KR", "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 14% 14%, var(--bg-1) 0, transparent 28%),
+        radial-gradient(circle at 86% 18%, var(--bg-2) 0, transparent 30%),
+        #f8fafc;
+      min-height: 100vh;
+      padding: 28px 18px 40px;
+    }
+    .shell { max-width: 980px; margin: 0 auto; }
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 24px;
+      background: linear-gradient(135deg, #ffffff 0%, #eefbf9 100%);
+      box-shadow: 0 14px 36px rgba(16, 24, 40, 0.08);
+      margin-bottom: 16px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Space Grotesk", "IBM Plex Sans KR", sans-serif;
+      font-size: 34px;
+      letter-spacing: -0.5px;
+    }
+    .sub { margin: 8px 0 0; color: var(--muted); }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      background: var(--panel);
+      box-shadow: 0 8px 26px rgba(15, 23, 42, 0.06);
+    }
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .row { display: grid; gap: 8px; margin-bottom: 12px; }
+    label { font-size: 13px; color: var(--muted); }
+    textarea, input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 11px 12px;
+      background: #fff;
+      font-size: 14px;
+    }
+    textarea { min-height: 86px; resize: vertical; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      font-weight: 700;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-main { background: #0f766e; color: #fff; }
+    .btn-sub { background: #0f172a; color: #fff; }
+    .btn-ghost { background: #f1f5f9; color: #0f172a; }
+    .error { color: var(--bad); min-height: 20px; margin-top: 8px; }
+    .result-wrap { margin-top: 14px; display: grid; gap: 10px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      background: #fff;
+      animation: rise 180ms ease-out;
+    }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .domain { font-weight: 700; }
+    .badge {
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .b-available { background: #dcfce7; color: #166534; }
+    .b-unavailable { background: #fee2e2; color: #991b1b; }
+    .b-duplicate { background: #fef3c7; color: #92400e; }
+    .b-uncertain { background: #e2e8f0; color: #334155; }
+    .meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .alts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .alt {
+      font-size: 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: #f8fafc;
+    }
+    .reroll {
+      display: none;
+      margin-top: 8px;
+      padding: 9px;
+      border-radius: 10px;
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      font-size: 13px;
+    }
+    .reroll.show { display: block; }
+    @keyframes rise {
+      from { transform: translateY(6px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @media (max-width: 700px) {
+      h1 { font-size: 28px; }
+      .split { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <h1>DomainNamer</h1>
+      <p class="sub">브랜드 후보를 넣으면 중복을 제외하고 추천하고, 막힌 후보는 재추천까지 이어서 테스트할 수 있습니다.</p>
+    </section>
+
+    <section class="panel">
+      <div class="split">
+        <div>
+          <div class="row">
+            <label for="candidates">도메인 후보 (쉼표 또는 줄바꿈)</label>
+            <textarea id="candidates">brandhub, my-app, My App</textarea>
+          </div>
+          <div class="actions">
+            <button class="btn-main" id="runRecommend">추천 실행</button>
+            <button class="btn-ghost" id="fillExample">예시 채우기</button>
+          </div>
+        </div>
+        <div>
+          <div class="row">
+            <label for="serviceName">서비스 이름</label>
+            <input id="serviceName" placeholder="예: AI 세무 비서">
+          </div>
+          <div class="row">
+            <label for="serviceDescription">서비스 설명</label>
+            <textarea id="serviceDescription" placeholder="예: 자영업자를 위한 세금 계산과 신고 자동화"></textarea>
+          </div>
+          <div class="actions">
+            <button class="btn-sub" id="runServiceRecommend">서비스로 추천</button>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <a href="/domainamer/playground/" style="text-decoration:none;"><button type="button" class="btn-ghost">API Playground</button></a>
+      </div>
+      <div class="error" id="error"></div>
+      <div class="result-wrap" id="results"></div>
+    </section>
+  </main>
+
+  <script>
+    const output = document.getElementById("results");
+    const errorBox = document.getElementById("error");
+
+    function getCookie(name) {
+      const value = `; ${document.cookie}`;
+      const parts = value.split(`; ${name}=`);
+      return parts.length === 2 ? parts.pop().split(";").shift() : "";
+    }
+
+    function parseCandidates(text) {
+      return text
+        .split(/\n|,/g)
+        .map(v => v.trim())
+        .filter(Boolean);
+    }
+
+    async function postJson(url, payload) {
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": getCookie("csrftoken")
+        },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(`${res.status} ${JSON.stringify(data)}`);
+      }
+      return data;
+    }
+
+    function createCard(item) {
+      const card = document.createElement("article");
+      card.className = "card";
+      const badgeClass = `b-${item.status}`;
+      const altHtml = (item.alternatives || []).map(alt => `<span class="alt">${alt}</span>`).join("");
+      card.innerHTML = `
+        <div class="top">
+          <div class="domain">${item.candidate}</div>
+          <span class="badge ${badgeClass}">${item.status}</span>
+        </div>
+        <div class="meta">reason: ${item.reason || "-"} / confidence: ${item.confidence}</div>
+        <div class="alts">${altHtml || '<span class="alt">대안 없음</span>'}</div>
+        <div class="actions">
+          <button class="btn-ghost reroll-btn">재추천</button>
+        </div>
+        <div class="reroll"></div>
+      `;
+
+      const btn = card.querySelector(".reroll-btn");
+      const rerollBox = card.querySelector(".reroll");
+      btn.addEventListener("click", async () => {
+        try {
+          const exclude = [item.candidate].concat(item.alternatives || []);
+          const payload = await postJson("/domainamer/recommend/reroll/", {
+            candidate: item.candidate,
+            exclude,
+            limit: 5
+          });
+          rerollBox.classList.add("show");
+          rerollBox.textContent = payload.alternatives.length
+            ? `재추천: ${payload.alternatives.join(", ")}`
+            : "재추천 결과가 없습니다.";
+        } catch (err) {
+          rerollBox.classList.add("show");
+          rerollBox.textContent = `재추천 실패: ${err.message}`;
+        }
+      });
+
+      return card;
+    }
+
+    async function runRecommend() {
+      errorBox.textContent = "";
+      output.innerHTML = "";
+      try {
+        const candidates = parseCandidates(document.getElementById("candidates").value);
+        const payload = await postJson("/domainamer/recommend/", { candidates });
+        renderResults(payload.results || []);
+      } catch (err) {
+        errorBox.textContent = err.message;
+      }
+    }
+
+    function renderResults(items) {
+      output.innerHTML = "";
+      (items || []).forEach(item => output.appendChild(createCard(item)));
+    }
+
+    async function runServiceRecommend() {
+      errorBox.textContent = "";
+      output.innerHTML = "";
+      try {
+        const service_name = document.getElementById("serviceName").value.trim();
+        const service_description = document.getElementById("serviceDescription").value.trim();
+        const payload = await postJson("/domainamer/recommend/service/", {
+          service_name,
+          service_description
+        });
+        renderResults(payload.results || []);
+      } catch (err) {
+        errorBox.textContent = err.message;
+      }
+    }
+
+    document.getElementById("runRecommend").addEventListener("click", runRecommend);
+    document.getElementById("runServiceRecommend").addEventListener("click", runServiceRecommend);
+    document.getElementById("fillExample").addEventListener("click", () => {
+      document.getElementById("candidates").value = "brandhub, brandhub, quroom";
+    });
+  </script>
+</body>
+</html>

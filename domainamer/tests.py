@@ -22,6 +22,7 @@ from .services.availability import (
 from .services.domain_recommender import (
     normalize_candidate,
     recommend_domains,
+    recommend_domains_from_service,
     reroll_domain_alternatives,
 )
 from .services.watchlist import run_watchlist_check
@@ -139,6 +140,14 @@ class DomainRecommenderServiceTests(TestCase):
         self.assertNotIn("brandhub.kr", data["alternatives"])
         self.assertNotIn("brandhub.io", data["alternatives"])
         self.assertGreater(len(data["alternatives"]), 0)
+
+    def test_service_based_recommendation_generates_seed_candidates(self):
+        data = recommend_domains_from_service(
+            service_name="TaxPilot",
+            service_description="AI bookkeeping helper for freelancers",
+        )
+        self.assertGreater(len(data["seeds"]), 0)
+        self.assertGreater(len(data["results"]), 0)
 
 
 class WatchlistServiceTests(TestCase):
@@ -382,6 +391,10 @@ class AvailabilityOrchestratorTests(TestCase):
 
 
 class DomainRecommendationViewTests(TestCase):
+    def test_home_page_loads(self):
+        response = self.client.get("/domainamer/")
+        self.assertEqual(response.status_code, 200)
+
     @override_settings(DOMAIN_HARDENED_CHECK_ENABLED=True, DOMAIN_SHADOW_MODE=False)
     def test_recommend_endpoint_returns_hardened_contract(self):
         response = self.client.post(
@@ -507,6 +520,23 @@ class DomainRecommendationViewTests(TestCase):
         self.assertEqual(payload["candidate"], "brandhub.com")
         self.assertNotIn("brandhub.kr", payload["alternatives"])
         self.assertNotIn("brandhub.io", payload["alternatives"])
+
+    def test_recommend_service_endpoint_returns_results(self):
+        response = self.client.post(
+            "/domainamer/recommend/service/",
+            data=json.dumps(
+                {
+                    "service_name": "TaxPilot",
+                    "service_description": "AI bookkeeping helper for freelancers",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("seeds", payload)
+        self.assertIn("results", payload)
+        self.assertGreater(len(payload["results"]), 0)
 
 
 class WatchlistApiTests(TestCase):

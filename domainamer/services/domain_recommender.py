@@ -194,26 +194,73 @@ def recommend_domains(
 def reroll_domain_alternatives(
     base_candidate: str,
     exclude_domains: Iterable[str],
-    availability_checker: AvailabilityChecker | None = None,
     preferred_tlds: Iterable[str] = ("com", "kr", "io"),
     limit: int = 3,
 ) -> dict[str, object]:
-    checker = availability_checker or default_availability_checker
-    base_domain = to_domain(base_candidate)
+    base = normalize_candidate(base_candidate)
+    base_domain = f"{base}.com" if base else ""
     normalized_excludes = {item for item in (normalize_domain_entry(domain) for domain in exclude_domains) if item}
-    seen_domains = set(normalized_excludes)
     if base_domain:
-        seen_domains.add(base_domain)
+        normalized_excludes.add(base_domain)
 
-    alternatives = generate_alternatives(
-        base_candidate=base_candidate,
-        existing_domains=seen_domains,
-        checker=checker,
-        preferred_tlds=preferred_tlds,
-        limit=limit,
-    )
+    pool: list[str] = []
+    for tld in preferred_tlds:
+        normalized_tld = normalize_tld(tld)
+        if normalized_tld:
+            pool.append(f"{base}.{normalized_tld}")
+    for suffix in ("go", "lab", "hq", "app", "now", "360"):
+        pool.append(f"{base}{suffix}.com")
+    for number in range(1, 20):
+        pool.append(f"{base}{number}.com")
+
+    alternatives: list[str] = []
+    seen = set(normalized_excludes)
+    for candidate in pool:
+        normalized = normalize_domain_entry(candidate)
+        if not normalized or normalized in seen:
+            continue
+        alternatives.append(normalized)
+        seen.add(normalized)
+        if len(alternatives) >= limit:
+            break
     return {
         "candidate": base_domain,
         "excluded": sorted(normalized_excludes),
         "alternatives": alternatives,
     }
+
+
+def recommend_domains_from_service(
+    service_name: str,
+    service_description: str,
+    availability_checker: AvailabilityChecker | None = None,
+    availability_resolver: AvailabilityResolver | None = None,
+    preferred_tlds: Iterable[str] = ("com", "kr", "io"),
+    seed_limit: int = 6,
+) -> dict[str, object]:
+    raw = f"{service_name} {service_description}".strip().lower()
+    tokens = [normalize_candidate(token) for token in re.findall(r"[a-zA-Z0-9가-힣]+", raw)]
+    tokens = [token for token in tokens if token and len(token) >= 3]
+
+    seeds: list[str] = []
+    for token in tokens:
+        if token not in seeds:
+            seeds.append(token)
+        if len(seeds) >= seed_limit:
+            break
+
+    base = normalize_candidate(service_name)
+    if base and base not in seeds:
+        seeds.insert(0, base)
+    if len(seeds) < 2 and base:
+        seeds.append(f"{base}app")
+    if not seeds:
+        seeds = ["mybrand", "brandhub", "servicelab"]
+
+    result = recommend_domains(
+        candidates=seeds[:seed_limit],
+        availability_checker=availability_checker,
+        availability_resolver=availability_resolver,
+        preferred_tlds=preferred_tlds,
+    )
+    return {"seeds": seeds[:seed_limit], "results": result["results"]}

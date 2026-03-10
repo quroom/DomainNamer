@@ -2,6 +2,8 @@ import json
 
 from django.conf import settings
 from django.http import JsonResponse
+from django.shortcuts import render
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from .models import DomainAlertEvent, DomainWatchItem, WatchlistCheckJob
@@ -16,11 +18,24 @@ from .services.availability import (
 from .services.domain_recommender import (
     normalize_candidate,
     recommend_domains,
+    recommend_domains_from_service,
     reroll_domain_alternatives,
 )
 
 _ORCHESTRATOR = None
 _ORCHESTRATOR_KEY = None
+
+
+@require_GET
+@ensure_csrf_cookie
+def home_view(request):
+    return render(request, "domainamer/app.html")
+
+
+@require_GET
+@ensure_csrf_cookie
+def playground_view(request):
+    return render(request, "domainamer/playground.html")
 
 
 def _parse_candidates(request):
@@ -230,6 +245,50 @@ def reroll_recommendation_view(request):
         limit=limit,
     )
     return JsonResponse(result)
+
+
+@require_POST
+def service_recommendation_view(request):
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid_json"}, status=400)
+
+    service_name = str(payload.get("service_name", "")).strip()
+    service_description = str(payload.get("service_description", "")).strip()
+    if not service_name and not service_description:
+        return JsonResponse({"error": "service_input_required"}, status=400)
+
+    preferred_tlds = tuple(getattr(settings, "DOMAIN_PREFERRED_TLDS", ["com", "kr", "io"]))
+    use_hardened = getattr(settings, "DOMAIN_HARDENED_CHECK_ENABLED", True)
+    fallback = getattr(settings, "DOMAIN_HARDENED_FALLBACK_TO_LEGACY", True)
+
+    if not use_hardened:
+        data = recommend_domains_from_service(
+            service_name=service_name,
+            service_description=service_description,
+            preferred_tlds=preferred_tlds,
+        )
+        return JsonResponse(data)
+
+    try:
+        orchestrator = _get_orchestrator()
+        data = recommend_domains_from_service(
+            service_name=service_name,
+            service_description=service_description,
+            availability_resolver=orchestrator.check,
+            preferred_tlds=preferred_tlds,
+        )
+        return JsonResponse(data)
+    except Exception:
+        if fallback:
+            data = recommend_domains_from_service(
+                service_name=service_name,
+                service_description=service_description,
+                preferred_tlds=preferred_tlds,
+            )
+            return JsonResponse(data)
+        raise
 
 
 @require_http_methods(["GET", "POST"])
